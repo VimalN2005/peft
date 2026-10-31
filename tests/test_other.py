@@ -35,6 +35,7 @@ from peft import (
     LoHaConfig,
     LoraConfig,
     PeftModel,
+    PromptTuningConfig,
     TrainableTokensConfig,
     VeraConfig,
     get_peft_model,
@@ -1173,3 +1174,74 @@ class TestTaskTypeModulesToSave:
 
         assert user_list == ["my_head"]
         assert model.peft_config["other"].modules_to_save == ["my_head"] + head_names
+
+
+def test_prompt_learning_non_iterable_config():
+    # Test that prompt learning setup handles base model config that does not implement __contains__ or __iter__
+    # (e.g. PretrainedConfig in transformers < 4.45 without get_text_config), avoiding TypeError (#3951).
+    class NonIterableConfig:
+        def __init__(self, vocab_size=32):
+            self.vocab_size = vocab_size
+
+        def to_dict(self):
+            return {"vocab_size": self.vocab_size}
+
+    class DummyModel(nn.Module):
+        def __init__(self, config):
+            super().__init__()
+            self.config = config
+            self.embed_tokens = nn.Embedding(config.vocab_size, 10)
+            self.linear = nn.Linear(10, 10)
+
+        def forward(self, input_ids):
+            return self.linear(self.embed_tokens(input_ids))
+
+        def get_input_embeddings(self):
+            return self.embed_tokens
+
+    config = NonIterableConfig(vocab_size=32)
+    model = DummyModel(config)
+    peft_config = PromptTuningConfig(
+        task_type="CAUSAL_LM",
+        num_virtual_tokens=5,
+        token_dim=10,
+        num_layers=1,
+    )
+    peft_model = get_peft_model(model, peft_config)
+    assert peft_model.word_embeddings is model.embed_tokens
+
+
+def test_prompt_learning_text_config_fallback():
+    # Test fallback when base model config has text_config attribute but no get_text_config method (#3951).
+    from types import SimpleNamespace
+
+    class LegacyVLMConfig:
+        def __init__(self, vocab_size=32):
+            self.text_config = SimpleNamespace(vocab_size=vocab_size)
+
+        def to_dict(self):
+            return {"text_config": {"vocab_size": self.text_config.vocab_size}}
+
+    class DummyModel(nn.Module):
+        def __init__(self, config):
+            super().__init__()
+            self.config = config
+            self.embed_tokens = nn.Embedding(config.text_config.vocab_size, 10)
+            self.linear = nn.Linear(10, 10)
+
+        def forward(self, input_ids):
+            return self.linear(self.embed_tokens(input_ids))
+
+        def get_input_embeddings(self):
+            return self.embed_tokens
+
+    config = LegacyVLMConfig(vocab_size=32)
+    model = DummyModel(config)
+    peft_config = PromptTuningConfig(
+        task_type="CAUSAL_LM",
+        num_virtual_tokens=5,
+        token_dim=10,
+        num_layers=1,
+    )
+    peft_model = get_peft_model(model, peft_config)
+    assert peft_model.word_embeddings is model.embed_tokens
